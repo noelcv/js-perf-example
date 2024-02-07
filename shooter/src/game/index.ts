@@ -1,47 +1,11 @@
 import { getLogger } from "../logger";
 import WebSocket from "ws";
 import { Game } from "./game";
-import { Writer, getWriter } from "./data-writer";
+import { getWriter } from "./data-writer";
+import { getTimer, ticker } from "./ticker";
 
 const FPS = 1000 / 60;
 
-function ticker(rate: number, writer: Writer) {
-    let next = Date.now() + rate;
-    let previousNow = 0;
-
-    return async function tickRunner() {
-        const now = Date.now();
-        const interval = now - previousNow;
-
-        if (previousNow !== 0) {
-            writer.write("tickInterval", interval);
-            if (interval > rate + 1) {
-                writer.count("tickIntervalOverrun");
-            } else if (interval < Math.floor(rate - 1)) {
-                writer.count("tickIntervalUnderrun");
-            } else {
-                writer.count("tickOnTime");
-            }
-        }
-
-        let flooredNext = Math.floor(next);
-        const remaining = flooredNext - now;
-
-        if (remaining > 0) {
-            await new Promise(resolve => setTimeout(resolve, remaining));
-        }
-
-        const endNow = Date.now();
-        const extras = endNow - flooredNext;
-
-        next = next + rate;
-        previousNow = now;
-
-        writer.write("tickRuntime", endNow - now);
-
-        return extras + remaining;
-    }
-}
 
 async function waitForOpen(socket: WebSocket): Promise<void> {
     return new Promise(function waitForOpen(resolve, reject) {
@@ -123,15 +87,16 @@ async function playGame(p1: WebSocket, p2: WebSocket) {
         console.error("p2 ERROR", e);
         s2.error = true
     });
-
+    //gameTicker has the sole purpose of giving us the next time to run
     const gameTicker = ticker(FPS, getWriter());
     const game = new Game(100);
     let ticksTotal = 0;
-
-    do {
+    let lastRanTime = Date.now();
+    function run() {
         // state checking / clean up
-
-        let ticks = await gameTicker();
+       const now = Date.now();
+        let ticks = now - lastRanTime; // how long it took us to run this again
+        lastRanTime = now;
         ticksTotal += ticks;
         while (ticks > 0) {
             if (ticks > 16) {
@@ -157,8 +122,14 @@ async function playGame(p1: WebSocket, p2: WebSocket) {
 
         s1.messages = [];
         s2.messages = [];
-
-    } while (!game.ended && !s1.close && !s2.close && !s1.error && !s2.error);
+        if(game.ended || s1.close || s2.close || s1.error || s2.error){
+            finish();
+        } else {
+            getTimer().add(run, gameTicker());
+        }
+    };
+   run();
+function finish(){
 
     const stopped1 = s1.close || s1.error;
     const stopped2 = s2.close || s2.error;
@@ -203,6 +174,8 @@ async function playGame(p1: WebSocket, p2: WebSocket) {
     }
 
     getWriter().count("games-played");
+
+  }
 }
 
 export function createGameRunner() {
